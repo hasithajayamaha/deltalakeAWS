@@ -4,73 +4,32 @@ Utilities for provisioning a lightweight AWS data lake footprint with boto3. The
 
 ## What it does
 
-- Creates or updates an S3 bucket with recommended security defaults (versioning, encryption, public access block, tags) and core prefixes (raw/ curated/ analytics/).
-- Creates or updates a Glue database for the analytics catalog and optionally a Glue crawler targeting the raw zone.
-- Creates or updates an Athena workgroup that writes query results back into the lake, optionally encrypted with your KMS key.
+- Hardened S3 bucket with raw / processed / analytics prefixes.
+- Glue database plus optional crawler for raw zone cataloguing.
+- Athena workgroup pinned to the analytics zone for querying.
+- Optional Kinesis Data Firehose stream and service role feeding the raw zone.
+- Optional IAM role scaffolding for processing frameworks (Databricks, Glue, EMR).
+- Optional Iceberg/Delta Glue table seed for ACID style workloads.
 
-## Installation
+## Key configuration knobs
 
-Create and activate a virtual environment, then install the project:
+- region / bucket_name / glue_database: core identifiers for the lake.
+- firehose.*: stream_name, role_name, buffering controls, and prefix for Kinesis Data Firehose.
+- processing_role: IAM assume-role policy plus managed/inline policies for your processing platform.
+- table_format + transactional_table_name + enable_transactional_tables: control Iceberg or Delta scaffolding.
+- athena_workgroup, kms_key_id, tags: tighten governance and encryption defaults.
+- crawler_*: optional Glue crawler wiring when ingest discovery is needed.
 
-    python -m venv .venv
-    source .venv/bin/activate
-    pip install -e .
-
-If you are using Python 3.10 or earlier, the dependency resolver will pull in "tomli" automatically for TOML parsing.
-
-## Configuration
-
-The CLI loads its settings from a TOML file with a [datalake] table. All fields map directly to the DataLakeConfig dataclass in datalake_aws.config.
-
-    [datalake]
-    region = "us-east-1"
-    bucket_name = "my-company-data-lake"
-    glue_database = "analytics_catalog"
-    raw_prefix = "raw/"
-    processed_prefix = "curated/"
-    analytics_prefix = "analytics/"
-    kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/example"
-    crawler_name = "raw-zone-crawler"
-    crawler_role_arn = "arn:aws:iam::123456789012:role/GlueCrawlerRole"
-    crawler_schedule = "cron(0 6 * * ? *)"
-    athena_workgroup = "lakehouse-workgroup"
-
-    [datalake.tags]
-    Environment = "dev"
-    Owner = "data-eng"
-
-Only region, bucket_name, and glue_database are required. Provide crawler_* values only when you want a Glue crawler managed for you.
+See examples/datalake.toml for a full sample covering all features.
 
 ## Running the CLI
 
-    python -m datalake_aws --region us-east-1 --config datalake.toml       --access-key YOUR_AWS_ACCESS_KEY_ID       --secret-key YOUR_AWS_SECRET_ACCESS_KEY
-
-Credentials are optional. If you omit them, boto3 falls back to the standard AWS credential chain (environment variables, shared config/credentials files, instance metadata, etc.).
+Run: python -m datalake_aws --region YOUR_REGION --config path/to/config.toml [--access-key KEY --secret-key SECRET]. The deployer reports each resource with a created/updated/skipped status for observability.
 
 ## Using the Python API
 
-    from datalake_aws import AwsCredentials, DataLakeConfig, DataLakeDeployer, SessionFactory
-
-    config = DataLakeConfig(
-        region="us-east-1",
-        bucket_name="my-company-data-lake",
-        glue_database="analytics_catalog",
-    )
-    credentials = AwsCredentials(
-        access_key_id="YOUR_AWS_ACCESS_KEY_ID",
-        secret_access_key="YOUR_AWS_SECRET_ACCESS_KEY",
-    )
-
-    sessions = SessionFactory(region=config.region, credentials=credentials)
-    deployer = DataLakeDeployer(sessions)
-    deployer.deploy(config)
-
-The deployer methods are idempotent; subsequent runs keep resources in sync.
+Initialise DataLakeConfig (optionally injecting FirehoseConfig and IamRoleConfig), build a SessionFactory, then call DataLakeDeployer.deploy(config) to converge resources in AWS.
 
 ## Testing changes locally
 
-The project has no runtime dependencies beyond boto3 and tomli (for Python < 3.11). You can quickly validate the code compiles by running:
-
-    python -m compileall src
-
-For integration testing you will need AWS credentials with permissions for S3, Glue, Athena, and optionally KMS.
+Run python -m compileall src for a quick syntax check. Integration validation requires AWS credentials with permissions for S3, IAM, Glue, Firehose, Athena, and optionally KMS.
