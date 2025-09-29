@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deltalake-aws"
+version = "0.1.0"
+description = "Utilities and APIs for deploying an AWS-based data lake using boto3"
+readme = "README.md"
+authors = [{name = "Your Name"}]
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "boto3>=1.26,<2",
+    "tomli>=2.0; python_version < \"3.11\"",
+]
+
+[project.urls]
+Homepage = "https://example.com/deltalake-aws"
+Source = "https://example.com/deltalake-aws/source"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
