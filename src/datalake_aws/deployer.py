@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 
 from .config import DataLakeConfig, FirehoseConfig, IamRoleConfig, LakeFormationConfig, LakeFormationPermission
 from .sessions import SessionFactory
+from .exceptions import retry_on_throttle, handle_client_error, DeploymentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,7 +52,13 @@ class DataLakeDeployer:
 
     # --- S3 bucket -----------------------------------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update S3 bucket")
     def _ensure_bucket(self, config: DataLakeConfig) -> str:
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would create/update S3 bucket: %s", config.bucket_name)
+            return "dry-run"
+        
         s3_client = self._sessions.client("s3")
         bucket = config.bucket_name
 
@@ -79,6 +86,21 @@ class DataLakeDeployer:
 
         self._logger.debug("Enabling versioning on bucket %s", bucket)
         s3_client.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+
+        # Enable access logging for security
+        self._logger.debug("Enabling access logging on bucket %s", bucket)
+        try:
+            s3_client.put_bucket_logging(
+                Bucket=bucket,
+                BucketLoggingStatus={
+                    'LoggingEnabled': {
+                        'TargetBucket': bucket,
+                        'TargetPrefix': 'logs/access-logs/'
+                    }
+                }
+            )
+        except ClientError as exc:
+            self._logger.warning("Could not enable access logging: %s", exc)
 
         if config.kms_key_id:
             self._logger.debug("Enabling SSE-KMS on bucket %s", bucket)
@@ -129,7 +151,13 @@ class DataLakeDeployer:
 
     # --- Glue ----------------------------------------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update Glue database")
     def _ensure_glue_database(self, config: DataLakeConfig) -> str:
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would create/update Glue database: %s", config.glue_database)
+            return "dry-run"
+        
         glue_client = self._sessions.client("glue")
         try:
             glue_client.get_database(Name=config.glue_database)
@@ -166,9 +194,15 @@ class DataLakeDeployer:
                 )
         return "created" if created else "updated"
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update Glue crawler")
     def _ensure_glue_crawler(self, config: DataLakeConfig) -> str:
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would create/update Glue crawler: %s", config.crawler_name)
+            return "dry-run"
+        
         if not config.crawler_role_arn:
-            raise ValueError("crawler_role_arn is required when crawler_name is set")
+            raise DeploymentError("crawler_role_arn is required when crawler_name is set")
 
         glue_client = self._sessions.client("glue")
         exists = False
@@ -220,7 +254,13 @@ class DataLakeDeployer:
 
     # --- Athena --------------------------------------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update Athena workgroup")
     def _ensure_athena_workgroup(self, config: DataLakeConfig) -> str:
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would create/update Athena workgroup: %s", config.athena_workgroup)
+            return "dry-run"
+        
         athena_client = self._sessions.client("athena")
         workgroup = config.athena_workgroup
         result_output = f"s3://{config.bucket_name}/{config.analytics_prefix}athena-results/"
@@ -290,6 +330,8 @@ class DataLakeDeployer:
 
     # --- IAM -----------------------------------------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update IAM role")
     def _ensure_iam_role(self, role_config: IamRoleConfig, tags: Optional[Dict[str, str]] = None) -> str:
         iam_client = self._sessions.client("iam")
         created = False
@@ -357,7 +399,13 @@ class DataLakeDeployer:
 
     # --- Firehose ------------------------------------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update Firehose stream")
     def _ensure_firehose_stream(self, config: DataLakeConfig) -> str:
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would create/update Firehose stream")
+            return "dry-run"
+        
         firehose_cfg = config.firehose
         if firehose_cfg is None:
             return "skipped"
@@ -493,8 +541,14 @@ class DataLakeDeployer:
 
     # --- VPC Endpoints -------------------------------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update VPC endpoints")
     def _ensure_vpc_endpoints(self, config: DataLakeConfig) -> str:
         """Ensure VPC endpoints for S3, Glue, and Athena are configured."""
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would create/update VPC endpoints")
+            return "dry-run"
+        
         vpc_config = config.vpc_endpoints
         if vpc_config is None:
             return "skipped"
@@ -665,8 +719,14 @@ class DataLakeDeployer:
 
     # --- Lake Formation ------------------------------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("configure Lake Formation")
     def _ensure_lake_formation(self, config: DataLakeConfig) -> str:
         """Configure AWS Lake Formation for fine-grained access control."""
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would configure Lake Formation")
+            return "dry-run"
+        
         lf_config = config.lake_formation
         if lf_config is None or not lf_config.enable_lake_formation:
             return "skipped"
@@ -932,14 +992,20 @@ class DataLakeDeployer:
 
     # --- Transactional (Iceberg/Delta) Assets -------------------------------------
 
+    @retry_on_throttle(max_retries=5, base_delay=1.0)
+    @handle_client_error("create/update transactional table")
     def _ensure_transactional_assets(self, config: DataLakeConfig) -> str:
+        if config.dry_run:
+            self._logger.info("[DRY-RUN] Would create/update transactional table: %s", config.transactional_table_name)
+            return "dry-run"
+        
         if not config.transactional_table_name:
             self._logger.debug("Transactional tables disabled or not configured")
             return "skipped"
 
         table_format = config.table_format.lower()
         if table_format not in {"iceberg", "delta"}:
-            raise ValueError("table_format must be 'iceberg' or 'delta'")
+            raise DeploymentError("table_format must be 'iceberg' or 'delta'")
 
         glue_client = self._sessions.client("glue")
         table_name = config.transactional_table_name

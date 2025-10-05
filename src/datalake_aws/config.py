@@ -10,6 +10,16 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
     import tomli as tomllib  # type: ignore[assignment]
 
+from .validators import (
+    validate_bucket_name,
+    validate_region,
+    validate_database_name,
+    validate_prefix,
+    validate_table_format,
+    validate_arn,
+    validate_tags,
+)
+
 
 @dataclass
 class AwsCredentials:
@@ -223,6 +233,33 @@ class DataLakeConfig:
     processing_role: Optional[IamRoleConfig] = None
     vpc_endpoints: Optional[VpcEndpointConfig] = None
     lake_formation: Optional[LakeFormationConfig] = None
+    dry_run: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate configuration after initialization."""
+        # Validate required fields
+        validate_region(self.region)
+        validate_bucket_name(self.bucket_name)
+        validate_database_name(self.glue_database)
+        
+        # Validate and normalize prefixes
+        self.raw_prefix = validate_prefix(self.raw_prefix, "raw_prefix")
+        self.processed_prefix = validate_prefix(self.processed_prefix, "processed_prefix")
+        self.analytics_prefix = validate_prefix(self.analytics_prefix, "analytics_prefix")
+        
+        # Validate table format
+        validate_table_format(self.table_format)
+        
+        # Validate optional ARNs
+        if self.kms_key_id:
+            validate_arn(self.kms_key_id, "key")
+        
+        if self.crawler_role_arn:
+            validate_arn(self.crawler_role_arn, "role")
+        
+        # Validate tags
+        if self.tags:
+            validate_tags(self.tags)
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object]) -> "DataLakeConfig":

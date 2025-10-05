@@ -11,6 +11,12 @@ from .config import (
 )
 from .deployer import DataLakeDeployer
 from .sessions import SessionFactory
+from .exceptions import (
+    DataLakeError,
+    ValidationError,
+    DeploymentError,
+    ResourceNotFoundError,
+)
 
 __all__ = [
     "DataLakeConfig",
@@ -22,4 +28,8 @@ __all__ = [
     "LakeFormationPermission",
     "DataLakeDeployer",
     "SessionFactory",
+    "DataLakeError",
+    "ValidationError",
+    "DeploymentError",
+    "ResourceNotFoundError",
 ]

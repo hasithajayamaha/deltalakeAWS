@@ -34,6 +34,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without applying them to AWS",
+    )
     return parser
 
 
@@ -56,6 +61,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     config = DataLakeConfig.from_toml(args.config)
     # Allow region to be overridden from the CLI so the same config can be reused.
     config.region = args.region
+    # Set dry-run mode if specified
+    config.dry_run = args.dry_run
+    
+    if config.dry_run:
+        _LOGGER.info("Running in DRY-RUN mode - no changes will be made to AWS")
 
     credentials = _resolve_credentials(args)
     session_factory = SessionFactory(region=config.region, credentials=credentials)
