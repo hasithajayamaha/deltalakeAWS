@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError
 from .config import DataLakeConfig, FirehoseConfig, IamRoleConfig, LakeFormationConfig, LakeFormationPermission
 from .sessions import SessionFactory
 from .exceptions import retry_on_throttle, handle_client_error, DeploymentError
+from .state import StateManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -17,36 +18,61 @@ _LOGGER = logging.getLogger(__name__)
 class DataLakeDeployer:
     """Coordinates provisioning of the core AWS primitives backing a data lake."""
 
-    def __init__(self, session_factory: SessionFactory, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        logger: Optional[logging.Logger] = None,
+        state_manager: Optional[StateManager] = None,
+    ) -> None:
         self._sessions = session_factory
         self._logger = logger or _LOGGER
+        self._state_manager = state_manager
 
     def deploy(self, config: DataLakeConfig) -> Dict[str, str]:
         """Ensure data lake resources exist and are configured."""
+        # Check for drift if state manager is available
+        if self._state_manager and not config.dry_run:
+            drift = self._state_manager.detect_drift(config)
+            if drift and drift != ["No previous deployment found"]:
+                self._logger.warning("Configuration drift detected:")
+                for change in drift:
+                    self._logger.warning("  - %s", change)
+        
         summary: Dict[str, str] = {}
+        success = True
         
-        # VPC endpoints should be created first if configured
-        if config.vpc_endpoints:
-            summary["vpc_endpoints"] = self._ensure_vpc_endpoints(config)
+        try:
+            # VPC endpoints should be created first if configured
+            if config.vpc_endpoints:
+                summary["vpc_endpoints"] = self._ensure_vpc_endpoints(config)
+            
+            summary["s3_bucket"] = self._ensure_bucket(config)
+            summary["glue_database"] = self._ensure_glue_database(config)
+
+            if config.processing_role:
+                summary["processing_role"] = self._ensure_iam_role(config.processing_role, config.tags)
+            if config.firehose:
+                summary["firehose_stream"] = self._ensure_firehose_stream(config)
+
+            if config.crawler_name:
+                summary["glue_crawler"] = self._ensure_glue_crawler(config)
+            if config.athena_workgroup:
+                summary["athena_workgroup"] = self._ensure_athena_workgroup(config)
+
+            if config.enable_transactional_tables:
+                summary["transactional_assets"] = self._ensure_transactional_assets(config)
+
+            if config.lake_formation and config.lake_formation.enable_lake_formation:
+                summary["lake_formation"] = self._ensure_lake_formation(config)
         
-        summary["s3_bucket"] = self._ensure_bucket(config)
-        summary["glue_database"] = self._ensure_glue_database(config)
-
-        if config.processing_role:
-            summary["processing_role"] = self._ensure_iam_role(config.processing_role, config.tags)
-        if config.firehose:
-            summary["firehose_stream"] = self._ensure_firehose_stream(config)
-
-        if config.crawler_name:
-            summary["glue_crawler"] = self._ensure_glue_crawler(config)
-        if config.athena_workgroup:
-            summary["athena_workgroup"] = self._ensure_athena_workgroup(config)
-
-        if config.enable_transactional_tables:
-            summary["transactional_assets"] = self._ensure_transactional_assets(config)
-
-        if config.lake_formation and config.lake_formation.enable_lake_formation:
-            summary["lake_formation"] = self._ensure_lake_formation(config)
+        except Exception as exc:
+            success = False
+            self._logger.error("Deployment failed: %s", exc)
+            raise
+        finally:
+            # Save deployment state if state manager is available
+            if self._state_manager:
+                self._state_manager.save_deployment(config, summary, success)
 
         return summary
 

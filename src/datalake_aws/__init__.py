@@ -17,6 +17,8 @@ from .exceptions import (
     DeploymentError,
     ResourceNotFoundError,
 )
+from .state import StateManager
+from .cost import CostEstimator, CostEstimate
 
 __all__ = [
     "DataLakeConfig",
@@ -32,4 +34,7 @@ __all__ = [
     "ValidationError",
     "DeploymentError",
     "ResourceNotFoundError",
+    "StateManager",
+    "CostEstimator",
+    "CostEstimate",
 ]
