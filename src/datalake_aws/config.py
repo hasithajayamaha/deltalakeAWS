@@ -91,6 +91,114 @@ class IamRoleConfig:
 
 
 @dataclass
+class VpcEndpointConfig:
+    """Configuration for VPC endpoints to access AWS services privately."""
+
+    vpc_id: str
+    subnet_ids: List[str] = field(default_factory=list)
+    security_group_ids: List[str] = field(default_factory=list)
+    route_table_ids: List[str] = field(default_factory=list)
+    enable_s3: bool = True
+    enable_glue: bool = True
+    enable_athena: bool = True
+    enable_dns_support: bool = True
+    enable_private_dns: bool = True
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, object]) -> "VpcEndpointConfig":
+        subnet_ids = data.get("subnet_ids", [])
+        if not isinstance(subnet_ids, list):
+            raise TypeError("subnet_ids must be a list")
+        
+        security_group_ids = data.get("security_group_ids", [])
+        if not isinstance(security_group_ids, list):
+            raise TypeError("security_group_ids must be a list")
+        
+        route_table_ids = data.get("route_table_ids", [])
+        if not isinstance(route_table_ids, list):
+            raise TypeError("route_table_ids must be a list")
+        
+        return cls(
+            vpc_id=str(data["vpc_id"]),
+            subnet_ids=[str(sid) for sid in subnet_ids],
+            security_group_ids=[str(sgid) for sgid in security_group_ids],
+            route_table_ids=[str(rtid) for rtid in route_table_ids],
+            enable_s3=bool(data.get("enable_s3", True)),
+            enable_glue=bool(data.get("enable_glue", True)),
+            enable_athena=bool(data.get("enable_athena", True)),
+            enable_dns_support=bool(data.get("enable_dns_support", True)),
+            enable_private_dns=bool(data.get("enable_private_dns", True)),
+        )
+
+
+@dataclass
+class LakeFormationPermission:
+    """A single Lake Formation permission grant."""
+
+    principal: str
+    resource_type: str  # DATABASE, TABLE, DATA_LOCATION
+    database_name: Optional[str] = None
+    table_name: Optional[str] = None
+    table_wildcard: bool = False
+    permissions: List[str] = field(default_factory=list)
+    permissions_with_grant_option: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, object]) -> "LakeFormationPermission":
+        permissions = data.get("permissions", [])
+        if not isinstance(permissions, list):
+            raise TypeError("permissions must be a list")
+        
+        permissions_with_grant = data.get("permissions_with_grant_option", [])
+        if not isinstance(permissions_with_grant, list):
+            raise TypeError("permissions_with_grant_option must be a list")
+        
+        return cls(
+            principal=str(data["principal"]),
+            resource_type=str(data["resource_type"]),
+            database_name=str(data.get("database_name")) if data.get("database_name") is not None else None,
+            table_name=str(data.get("table_name")) if data.get("table_name") is not None else None,
+            table_wildcard=bool(data.get("table_wildcard", False)),
+            permissions=[str(p) for p in permissions],
+            permissions_with_grant_option=[str(p) for p in permissions_with_grant],
+        )
+
+
+@dataclass
+class LakeFormationConfig:
+    """Configuration for AWS Lake Formation integration."""
+
+    enable_lake_formation: bool = False
+    data_lake_admins: List[str] = field(default_factory=list)
+    register_s3_location: bool = True
+    use_lake_formation_credentials: bool = True
+    permissions: List[LakeFormationPermission] = field(default_factory=list)
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, object]) -> "LakeFormationConfig":
+        admins = data.get("data_lake_admins", [])
+        if not isinstance(admins, list):
+            raise TypeError("data_lake_admins must be a list")
+        
+        permissions_data = data.get("permissions", [])
+        if not isinstance(permissions_data, list):
+            raise TypeError("permissions must be a list")
+        
+        permissions = []
+        for perm_data in permissions_data:
+            if isinstance(perm_data, Mapping):
+                permissions.append(LakeFormationPermission.from_mapping(perm_data))
+        
+        return cls(
+            enable_lake_formation=bool(data.get("enable_lake_formation", False)),
+            data_lake_admins=[str(admin) for admin in admins],
+            register_s3_location=bool(data.get("register_s3_location", True)),
+            use_lake_formation_credentials=bool(data.get("use_lake_formation_credentials", True)),
+            permissions=permissions,
+        )
+
+
+@dataclass
 class DataLakeConfig:
     """Configuration values controlling how the data lake should be provisioned."""
 
@@ -113,6 +221,8 @@ class DataLakeConfig:
     tags: Dict[str, str] = field(default_factory=dict)
     firehose: Optional[FirehoseConfig] = None
     processing_role: Optional[IamRoleConfig] = None
+    vpc_endpoints: Optional[VpcEndpointConfig] = None
+    lake_formation: Optional[LakeFormationConfig] = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object]) -> "DataLakeConfig":
@@ -129,6 +239,20 @@ class DataLakeConfig:
             processing_role = IamRoleConfig.from_mapping(processing_role_cfg)
         elif processing_role_cfg is not None:
             raise TypeError("processing_role configuration must be a mapping if provided")
+
+        vpc_endpoints_cfg = data.get("vpc_endpoints")
+        vpc_endpoints: Optional[VpcEndpointConfig] = None
+        if isinstance(vpc_endpoints_cfg, Mapping):
+            vpc_endpoints = VpcEndpointConfig.from_mapping(vpc_endpoints_cfg)
+        elif vpc_endpoints_cfg is not None:
+            raise TypeError("vpc_endpoints configuration must be a mapping if provided")
+
+        lake_formation_cfg = data.get("lake_formation")
+        lake_formation: Optional[LakeFormationConfig] = None
+        if isinstance(lake_formation_cfg, Mapping):
+            lake_formation = LakeFormationConfig.from_mapping(lake_formation_cfg)
+        elif lake_formation_cfg is not None:
+            raise TypeError("lake_formation configuration must be a mapping if provided")
 
         tags = data.get("tags", {})
         if tags and not isinstance(tags, Mapping):
@@ -154,6 +278,8 @@ class DataLakeConfig:
             tags=dict(tags),
             firehose=firehose,
             processing_role=processing_role,
+            vpc_endpoints=vpc_endpoints,
+            lake_formation=lake_formation,
         )
 
     @classmethod
@@ -173,4 +299,7 @@ __all__ = [
     "DataLakeConfig",
     "FirehoseConfig",
     "IamRoleConfig",
+    "VpcEndpointConfig",
+    "LakeFormationConfig",
+    "LakeFormationPermission",
 ]

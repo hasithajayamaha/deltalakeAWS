@@ -1,0 +1,69 @@
+[datalake]
+region = "us-east-1"
+bucket_name = "my-company-data-lake"
+glue_database = "analytics_catalog"
+raw_prefix = "raw/"
+processed_prefix = "curated/"
+analytics_prefix = "analytics/"
+kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/example"
+crawler_name = "raw-zone-crawler"
+crawler_role_arn = "arn:aws:iam::123456789012:role/GlueCrawlerRole"
+crawler_schedule = "cron(0 6 * * ? *)"
+athena_workgroup = "lakehouse-workgroup"
+table_format = "iceberg"
+transactional_table_name = "transactions"
+processing_platform = "databricks"
+
+[datalake.tags]
+Environment = "dev"
+Owner = "data-eng"
+
+[datalake.vpc_endpoints]
+vpc_id = "vpc-0123456789abcdef0"
+subnet_ids = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
+security_group_ids = ["sg-0123456789abcdef0"]
+route_table_ids = ["rtb-0123456789abcdef0"]
+enable_s3 = true
+enable_glue = true
+enable_athena = true
+enable_dns_support = true
+enable_private_dns = true
+
+[datalake.firehose]
+stream_name = "raw-events"
+role_name = "datalake-firehose-role"
+buffering_interval = 120
+buffering_size_mib = 3
+compression_format = "GZIP"
+prefix = "raw/events/"
+
+[datalake.processing_role]
+name = "datalake-processing-role"
+managed_policy_arns = [
+  "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole",
+]
+
+[datalake.processing_role.assume_role_policy]
+Version = "2012-10-17"
+
+[[datalake.processing_role.assume_role_policy.Statement]]
+Effect = "Allow"
+Action = "sts:AssumeRole"
+Principal = { Service = "ec2.amazonaws.com" }
+
+[datalake.processing_role.inline_policies.data_access]
+Version = "2012-10-17"
+
+[[datalake.processing_role.inline_policies.data_access.Statement]]
+Effect = "Allow"
+Action = [
+  "s3:GetObject",
+  "s3:PutObject",
+  "glue:GetDatabase",
+  "glue:GetTable",
+]
+Resource = [
+  "arn:aws:s3:::my-company-data-lake/*",
+  "arn:aws:glue:us-east-1:123456789012:database/analytics_catalog",
+  "arn:aws:glue:us-east-1:123456789012:table/analytics_catalog/*",
+]

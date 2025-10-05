@@ -1,0 +1,58 @@
+[datalake]
+region = "us-east-1"
+bucket_name = "my-company-data-lake"
+glue_database = "analytics_catalog"
+raw_prefix = "raw/"
+processed_prefix = "curated/"
+analytics_prefix = "analytics/"
+kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/example"
+athena_workgroup = "lakehouse-workgroup"
+table_format = "iceberg"
+transactional_table_name = "transactions"
+
+[datalake.tags]
+Environment = "production"
+Owner = "data-eng"
+Project = "analytics-platform"
+ManagedBy = "deltalake-aws"
+
+[datalake.lake_formation]
+enable_lake_formation = true
+register_s3_location = true
+use_lake_formation_credentials = true
+
+# Data lake administrators (IAM roles or ARNs)
+data_lake_admins = [
+  "DataLakeAdmin",  # IAM role name
+  "arn:aws:iam::123456789012:role/AdminRole"  # Full ARN
+]
+
+# Grant database-level permissions
+[[datalake.lake_formation.permissions]]
+principal = "arn:aws:iam::123456789012:role/DataAnalyst"
+resource_type = "DATABASE"
+database_name = "analytics_catalog"
+permissions = ["DESCRIBE"]
+
+# Grant table-level permissions with wildcard (all tables)
+[[datalake.lake_formation.permissions]]
+principal = "arn:aws:iam::123456789012:role/DataAnalyst"
+resource_type = "TABLE"
+database_name = "analytics_catalog"
+table_wildcard = true
+permissions = ["SELECT", "DESCRIBE"]
+
+# Grant specific table permissions
+[[datalake.lake_formation.permissions]]
+principal = "arn:aws:iam::123456789012:role/DataEngineer"
+resource_type = "TABLE"
+database_name = "analytics_catalog"
+table_name = "transactions"
+permissions = ["SELECT", "INSERT", "DELETE", "DESCRIBE"]
+permissions_with_grant_option = ["SELECT"]
+
+# Grant data location permissions
+[[datalake.lake_formation.permissions]]
+principal = "arn:aws:iam::123456789012:role/DataEngineer"
+resource_type = "DATA_LOCATION"
+permissions = ["DATA_LOCATION_ACCESS"]

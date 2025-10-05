@@ -10,6 +10,7 @@ Utilities for provisioning a lightweight AWS data lake footprint with boto3. The
 - Optional Kinesis Data Firehose stream and service role feeding the raw zone.
 - Optional IAM role scaffolding for processing frameworks (Databricks, Glue, EMR).
 - Optional Iceberg/Delta Glue table seed for ACID style workloads.
+- Optional VPC endpoints for private access to S3, Glue, and Athena services.
 
 ## Key configuration knobs
 
@@ -19,8 +20,9 @@ Utilities for provisioning a lightweight AWS data lake footprint with boto3. The
 - table_format + transactional_table_name + enable_transactional_tables: control Iceberg or Delta scaffolding.
 - athena_workgroup, kms_key_id, tags: tighten governance and encryption defaults.
 - crawler_*: optional Glue crawler wiring when ingest discovery is needed.
+- vpc_endpoints.*: configure VPC endpoints for private access to AWS services (S3, Glue, Athena).
 
-See examples/datalake.toml for a full sample covering all features.
+See examples/datalake.toml for a basic configuration and examples/datalake-with-vpc.toml for a configuration with VPC endpoints.
 
 ## Running the CLI
 
@@ -28,7 +30,29 @@ Run: python -m datalake_aws --region YOUR_REGION --config path/to/config.toml [-
 
 ## Using the Python API
 
-Initialise DataLakeConfig (optionally injecting FirehoseConfig and IamRoleConfig), build a SessionFactory, then call DataLakeDeployer.deploy(config) to converge resources in AWS.
+Initialise DataLakeConfig (optionally injecting FirehoseConfig, IamRoleConfig, and VpcEndpointConfig), build a SessionFactory, then call DataLakeDeployer.deploy(config) to converge resources in AWS.
+
+Example with VPC endpoints:
+```python
+from datalake_aws import DataLakeConfig, VpcEndpointConfig, SessionFactory, DataLakeDeployer
+
+vpc_config = VpcEndpointConfig(
+    vpc_id="vpc-0123456789abcdef0",
+    subnet_ids=["subnet-abc123", "subnet-def456"],
+    security_group_ids=["sg-abc123"],
+    route_table_ids=["rtb-abc123"],
+    enable_s3=True,
+    enable_glue=True,
+    enable_athena=True
+)
+
+config = DataLakeConfig.from_toml("config.toml")
+config.vpc_endpoints = vpc_config
+
+session_factory = SessionFactory(region=config.region)
+deployer = DataLakeDeployer(session_factory)
+summary = deployer.deploy(config)
+```
 
 ## Testing changes locally
 

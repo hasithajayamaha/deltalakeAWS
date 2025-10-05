@@ -7,7 +7,7 @@ from typing import Dict, Optional, Tuple
 
 from botocore.exceptions import ClientError
 
-from .config import DataLakeConfig, FirehoseConfig, IamRoleConfig
+from .config import DataLakeConfig, FirehoseConfig, IamRoleConfig, LakeFormationConfig, LakeFormationPermission
 from .sessions import SessionFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,11 +23,16 @@ class DataLakeDeployer:
     def deploy(self, config: DataLakeConfig) -> Dict[str, str]:
         """Ensure data lake resources exist and are configured."""
         summary: Dict[str, str] = {}
+        
+        # VPC endpoints should be created first if configured
+        if config.vpc_endpoints:
+            summary["vpc_endpoints"] = self._ensure_vpc_endpoints(config)
+        
         summary["s3_bucket"] = self._ensure_bucket(config)
         summary["glue_database"] = self._ensure_glue_database(config)
 
         if config.processing_role:
-            summary["processing_role"] = self._ensure_iam_role(config.processing_role)
+            summary["processing_role"] = self._ensure_iam_role(config.processing_role, config.tags)
         if config.firehose:
             summary["firehose_stream"] = self._ensure_firehose_stream(config)
 
@@ -38,6 +43,9 @@ class DataLakeDeployer:
 
         if config.enable_transactional_tables:
             summary["transactional_assets"] = self._ensure_transactional_assets(config)
+
+        if config.lake_formation and config.lake_formation.enable_lake_formation:
+            summary["lake_formation"] = self._ensure_lake_formation(config)
 
         return summary
 
@@ -126,6 +134,14 @@ class DataLakeDeployer:
         try:
             glue_client.get_database(Name=config.glue_database)
             created = False
+            # Update tags on existing database
+            if config.tags:
+                self._logger.debug("Updating tags on Glue database %s", config.glue_database)
+                self._tag_glue_resource(
+                    glue_client,
+                    f"arn:aws:glue:{config.region}:{self._get_account_id()}:database/{config.glue_database}",
+                    config.tags
+                )
         except ClientError as exc:
             error_code = exc.response["Error"].get("Code", "")
             if error_code != "EntityNotFoundException":
@@ -140,6 +156,14 @@ class DataLakeDeployer:
                 }
             )
             created = True
+            # Tag newly created database
+            if config.tags:
+                self._logger.debug("Tagging Glue database %s", config.glue_database)
+                self._tag_glue_resource(
+                    glue_client,
+                    f"arn:aws:glue:{config.region}:{self._get_account_id()}:database/{config.glue_database}",
+                    config.tags
+                )
         return "created" if created else "updated"
 
     def _ensure_glue_crawler(self, config: DataLakeConfig) -> str:
@@ -170,6 +194,14 @@ class DataLakeDeployer:
                 update_args["Schedule"] = config.crawler_schedule
             glue_client.update_crawler(**update_args)
             action = "updated"
+            # Update tags on existing crawler
+            if config.tags:
+                self._logger.debug("Updating tags on Glue crawler %s", config.crawler_name)
+                self._tag_glue_resource(
+                    glue_client,
+                    f"arn:aws:glue:{config.region}:{self._get_account_id()}:crawler/{config.crawler_name}",
+                    config.tags
+                )
         else:
             self._logger.info("Creating Glue crawler %s", config.crawler_name)
             create_args = {
@@ -180,6 +212,8 @@ class DataLakeDeployer:
             }
             if config.crawler_schedule:
                 create_args["Schedule"] = config.crawler_schedule
+            if config.tags:
+                create_args["Tags"] = config.tags
             glue_client.create_crawler(**create_args)
             action = "created"
         return action
@@ -214,6 +248,13 @@ class DataLakeDeployer:
                 Description="Managed by DataLakeDeployer",
                 ConfigurationUpdates=configuration_updates,
             )
+            # Update tags on existing workgroup
+            if config.tags:
+                self._logger.debug("Updating tags on Athena workgroup %s", workgroup)
+                athena_client.tag_resource(
+                    ResourceARN=f"arn:aws:athena:{config.region}:{self._get_account_id()}:workgroup/{workgroup}",
+                    Tags=[{"Key": k, "Value": v} for k, v in config.tags.items()]
+                )
             return "updated"
         except ClientError as exc:
             error_code = exc.response["Error"].get("Code", "")
@@ -242,12 +283,14 @@ class DataLakeDeployer:
             },
             "Description": "Managed by DataLakeDeployer",
         }
+        if config.tags:
+            create_args["Tags"] = [{"Key": k, "Value": v} for k, v in config.tags.items()]
         athena_client.create_work_group(**create_args)
         return "created"
 
     # --- IAM -----------------------------------------------------------------------
 
-    def _ensure_iam_role(self, role_config: IamRoleConfig) -> str:
+    def _ensure_iam_role(self, role_config: IamRoleConfig, tags: Optional[Dict[str, str]] = None) -> str:
         iam_client = self._sessions.client("iam")
         created = False
         try:
@@ -256,11 +299,14 @@ class DataLakeDeployer:
             if exc.response["Error"].get("Code") != "NoSuchEntity":
                 raise
             self._logger.info("Creating IAM role %s", role_config.name)
-            iam_client.create_role(
-                RoleName=role_config.name,
-                AssumeRolePolicyDocument=json.dumps(role_config.assume_role_policy),
-                Description="Managed by DataLakeDeployer",
-            )
+            create_args = {
+                "RoleName": role_config.name,
+                "AssumeRolePolicyDocument": json.dumps(role_config.assume_role_policy),
+                "Description": "Managed by DataLakeDeployer",
+            }
+            if tags:
+                create_args["Tags"] = [{"Key": k, "Value": v} for k, v in tags.items()]
+            iam_client.create_role(**create_args)
             created = True
         else:
             self._logger.debug("IAM role %s already exists; refreshing trust policy", role_config.name)
@@ -268,6 +314,23 @@ class DataLakeDeployer:
                 RoleName=role_config.name,
                 PolicyDocument=json.dumps(role_config.assume_role_policy),
             )
+            # Update tags on existing role
+            if tags:
+                self._logger.debug("Updating tags on IAM role %s", role_config.name)
+                # Remove old tags and add new ones
+                try:
+                    existing_tags = iam_client.list_role_tags(RoleName=role_config.name).get("Tags", [])
+                    if existing_tags:
+                        iam_client.untag_role(
+                            RoleName=role_config.name,
+                            TagKeys=[tag["Key"] for tag in existing_tags]
+                        )
+                except ClientError:
+                    pass
+                iam_client.tag_role(
+                    RoleName=role_config.name,
+                    Tags=[{"Key": k, "Value": v} for k, v in tags.items()]
+                )
 
         attached = iam_client.list_attached_role_policies(RoleName=role_config.name)["AttachedPolicies"]
         attached_arns = {policy["PolicyArn"] for policy in attached}
@@ -339,17 +402,32 @@ class DataLakeDeployer:
             return "updated"
 
         self._logger.info("Creating Firehose delivery stream %s", stream_name)
-        firehose_client.create_delivery_stream(
-            DeliveryStreamName=stream_name,
-            DeliveryStreamType="DirectPut",
-            ExtendedS3DestinationConfiguration={
+        create_args = {
+            "DeliveryStreamName": stream_name,
+            "DeliveryStreamType": "DirectPut",
+            "ExtendedS3DestinationConfiguration": {
                 "RoleARN": role_arn,
                 "BucketARN": bucket_arn,
                 "Prefix": destination_prefix,
                 "BufferingHints": buffering_hints,
                 "CompressionFormat": firehose_cfg.compression_format,
             },
-        )
+        }
+        if config.tags:
+            create_args["Tags"] = [{"Key": k, "Value": v} for k, v in config.tags.items()]
+        firehose_client.create_delivery_stream(**create_args)
+        
+        # Tag existing stream if updating
+        if exists:
+            try:
+                self._logger.debug("Updating tags on Firehose stream %s", stream_name)
+                firehose_client.tag_delivery_stream(
+                    DeliveryStreamName=stream_name,
+                    Tags=[{"Key": k, "Value": v} for k, v in config.tags.items()]
+                )
+            except ClientError:
+                pass
+        
         return "created"
 
     def _firehose_version_and_destination(self, description: Dict[str, object]) -> Tuple[str, str]:
@@ -406,12 +484,451 @@ class DataLakeDeployer:
             managed_policy_arns=[],
             inline_policies={"firehose-access": inline_policy},
         )
-        return self._ensure_iam_role(role_config)
+        return self._ensure_iam_role(role_config, config.tags)
 
     def _role_arn(self, role_name: str) -> str:
         iam_client = self._sessions.client("iam")
         response = iam_client.get_role(RoleName=role_name)
         return response["Role"]["Arn"]
+
+    # --- VPC Endpoints -------------------------------------------------------------
+
+    def _ensure_vpc_endpoints(self, config: DataLakeConfig) -> str:
+        """Ensure VPC endpoints for S3, Glue, and Athena are configured."""
+        vpc_config = config.vpc_endpoints
+        if vpc_config is None:
+            return "skipped"
+
+        ec2_client = self._sessions.client("ec2")
+        created_count = 0
+        updated_count = 0
+
+        # S3 Gateway Endpoint (uses route tables)
+        if vpc_config.enable_s3:
+            s3_status = self._ensure_s3_gateway_endpoint(ec2_client, config)
+            if s3_status == "created":
+                created_count += 1
+            elif s3_status == "updated":
+                updated_count += 1
+
+        # Glue Interface Endpoint (uses subnets and security groups)
+        if vpc_config.enable_glue:
+            glue_status = self._ensure_interface_endpoint(
+                ec2_client, config, "glue", f"com.amazonaws.{config.region}.glue"
+            )
+            if glue_status == "created":
+                created_count += 1
+            elif glue_status == "updated":
+                updated_count += 1
+
+        # Athena Interface Endpoint
+        if vpc_config.enable_athena:
+            athena_status = self._ensure_interface_endpoint(
+                ec2_client, config, "athena", f"com.amazonaws.{config.region}.athena"
+            )
+            if athena_status == "created":
+                created_count += 1
+            elif athena_status == "updated":
+                updated_count += 1
+
+        if created_count > 0:
+            return f"created ({created_count} endpoints)"
+        elif updated_count > 0:
+            return f"updated ({updated_count} endpoints)"
+        else:
+            return "skipped"
+
+    def _ensure_s3_gateway_endpoint(self, ec2_client, config: DataLakeConfig) -> str:
+        """Ensure S3 gateway endpoint exists."""
+        vpc_config = config.vpc_endpoints
+        if vpc_config is None:
+            return "skipped"
+
+        service_name = f"com.amazonaws.{config.region}.s3"
+        
+        # Check if endpoint already exists
+        try:
+            response = ec2_client.describe_vpc_endpoints(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_config.vpc_id]},
+                    {"Name": "service-name", "Values": [service_name]},
+                    {"Name": "vpc-endpoint-type", "Values": ["Gateway"]},
+                ]
+            )
+            endpoints = response.get("VpcEndpoints", [])
+            
+            if endpoints:
+                endpoint_id = endpoints[0]["VpcEndpointId"]
+                self._logger.info("S3 gateway endpoint %s already exists, updating route tables", endpoint_id)
+                
+                # Update route tables if needed
+                if vpc_config.route_table_ids:
+                    ec2_client.modify_vpc_endpoint(
+                        VpcEndpointId=endpoint_id,
+                        AddRouteTableIds=vpc_config.route_table_ids,
+                    )
+                return "updated"
+        except ClientError as exc:
+            self._logger.debug("Error checking S3 endpoint: %s", exc)
+
+        # Create new endpoint
+        self._logger.info("Creating S3 gateway endpoint in VPC %s", vpc_config.vpc_id)
+        create_args = {
+            "VpcId": vpc_config.vpc_id,
+            "ServiceName": service_name,
+            "VpcEndpointType": "Gateway",
+        }
+        
+        if vpc_config.route_table_ids:
+            create_args["RouteTableIds"] = vpc_config.route_table_ids
+        
+        if config.tags:
+            tag_specs = [
+                {
+                    "ResourceType": "vpc-endpoint",
+                    "Tags": [{"Key": k, "Value": v} for k, v in config.tags.items()],
+                }
+            ]
+            create_args["TagSpecifications"] = tag_specs
+
+        ec2_client.create_vpc_endpoint(**create_args)
+        return "created"
+
+    def _ensure_interface_endpoint(
+        self, ec2_client, config: DataLakeConfig, service_type: str, service_name: str
+    ) -> str:
+        """Ensure interface endpoint exists for a service."""
+        vpc_config = config.vpc_endpoints
+        if vpc_config is None:
+            return "skipped"
+
+        # Check if endpoint already exists
+        try:
+            response = ec2_client.describe_vpc_endpoints(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_config.vpc_id]},
+                    {"Name": "service-name", "Values": [service_name]},
+                    {"Name": "vpc-endpoint-type", "Values": ["Interface"]},
+                ]
+            )
+            endpoints = response.get("VpcEndpoints", [])
+            
+            if endpoints:
+                endpoint_id = endpoints[0]["VpcEndpointId"]
+                self._logger.info("%s interface endpoint %s already exists", service_type, endpoint_id)
+                
+                # Update security groups and subnets if needed
+                modify_args = {"VpcEndpointId": endpoint_id}
+                needs_update = False
+                
+                if vpc_config.security_group_ids:
+                    modify_args["AddSecurityGroupIds"] = vpc_config.security_group_ids
+                    needs_update = True
+                
+                if vpc_config.subnet_ids:
+                    modify_args["AddSubnetIds"] = vpc_config.subnet_ids
+                    needs_update = True
+                
+                if needs_update:
+                    ec2_client.modify_vpc_endpoint(**modify_args)
+                    return "updated"
+                return "skipped"
+        except ClientError as exc:
+            self._logger.debug("Error checking %s endpoint: %s", service_type, exc)
+
+        # Create new endpoint
+        self._logger.info("Creating %s interface endpoint in VPC %s", service_type, vpc_config.vpc_id)
+        create_args = {
+            "VpcId": vpc_config.vpc_id,
+            "ServiceName": service_name,
+            "VpcEndpointType": "Interface",
+            "PrivateDnsEnabled": vpc_config.enable_private_dns,
+        }
+        
+        if vpc_config.subnet_ids:
+            create_args["SubnetIds"] = vpc_config.subnet_ids
+        
+        if vpc_config.security_group_ids:
+            create_args["SecurityGroupIds"] = vpc_config.security_group_ids
+        
+        if config.tags:
+            tag_specs = [
+                {
+                    "ResourceType": "vpc-endpoint",
+                    "Tags": [{"Key": k, "Value": v} for k, v in config.tags.items()],
+                }
+            ]
+            create_args["TagSpecifications"] = tag_specs
+
+        ec2_client.create_vpc_endpoint(**create_args)
+        return "created"
+
+    # --- Lake Formation ------------------------------------------------------------
+
+    def _ensure_lake_formation(self, config: DataLakeConfig) -> str:
+        """Configure AWS Lake Formation for fine-grained access control."""
+        lf_config = config.lake_formation
+        if lf_config is None or not lf_config.enable_lake_formation:
+            return "skipped"
+
+        lf_client = self._sessions.client("lakeformation")
+        actions_taken = []
+
+        # Configure data lake administrators
+        if lf_config.data_lake_admins:
+            self._logger.info("Configuring Lake Formation data lake administrators")
+            self._set_data_lake_admins(lf_client, lf_config.data_lake_admins)
+            actions_taken.append("admins")
+
+        # Register S3 location with Lake Formation
+        if lf_config.register_s3_location:
+            self._logger.info("Registering S3 location with Lake Formation")
+            s3_location = f"s3://{config.bucket_name}/"
+            self._register_s3_location(lf_client, s3_location, config)
+            actions_taken.append("s3_location")
+
+        # Update Glue database to use Lake Formation permissions
+        if lf_config.use_lake_formation_credentials:
+            self._logger.info("Updating Glue database for Lake Formation")
+            self._update_database_for_lake_formation(config)
+            actions_taken.append("database_settings")
+
+        # Grant Lake Formation permissions
+        if lf_config.permissions:
+            self._logger.info("Granting Lake Formation permissions")
+            granted = self._grant_lake_formation_permissions(lf_client, config, lf_config.permissions)
+            actions_taken.append(f"permissions({granted})")
+
+        return f"configured: {', '.join(actions_taken)}" if actions_taken else "configured"
+
+    def _set_data_lake_admins(self, lf_client, admins: List[str]) -> None:
+        """Set Lake Formation data lake administrators."""
+        try:
+            # Get current settings
+            current_settings = lf_client.get_data_lake_settings()
+            
+            # Build admin list
+            admin_principals = []
+            for admin in admins:
+                if admin.startswith("arn:"):
+                    admin_principals.append({"DataLakePrincipalIdentifier": admin})
+                else:
+                    # Assume it's an IAM user/role name, construct ARN
+                    account_id = self._get_account_id()
+                    if "/" in admin:
+                        # Role with path
+                        admin_arn = f"arn:aws:iam::{account_id}:role/{admin}"
+                    else:
+                        # Simple role name
+                        admin_arn = f"arn:aws:iam::{account_id}:role/{admin}"
+                    admin_principals.append({"DataLakePrincipalIdentifier": admin_arn})
+            
+            # Update settings
+            lf_client.put_data_lake_settings(
+                DataLakeSettings={
+                    "DataLakeAdmins": admin_principals,
+                    "CreateDatabaseDefaultPermissions": [],
+                    "CreateTableDefaultPermissions": [],
+                }
+            )
+            self._logger.debug("Set %d Lake Formation administrators", len(admin_principals))
+        except ClientError as exc:
+            self._logger.warning("Failed to set Lake Formation administrators: %s", exc)
+
+    def _register_s3_location(self, lf_client, s3_location: str, config: DataLakeConfig) -> None:
+        """Register S3 location with Lake Formation."""
+        try:
+            # Check if already registered
+            response = lf_client.list_resources(
+                FilterConditionList=[
+                    {
+                        "Field": "RESOURCE_ARN",
+                        "ComparisonOperator": "EQ",
+                        "StringValueList": [f"arn:aws:s3:::{config.bucket_name}"]
+                    }
+                ]
+            )
+            
+            if response.get("ResourceInfoList"):
+                self._logger.debug("S3 location already registered with Lake Formation")
+                return
+            
+            # Register the location
+            # Need an IAM role for Lake Formation to access S3
+            role_arn = self._get_or_create_lf_service_role(config)
+            
+            lf_client.register_resource(
+                ResourceArn=f"arn:aws:s3:::{config.bucket_name}",
+                UseServiceLinkedRole=False,
+                RoleArn=role_arn
+            )
+            self._logger.debug("Registered S3 location with Lake Formation")
+        except ClientError as exc:
+            self._logger.warning("Failed to register S3 location: %s", exc)
+
+    def _get_or_create_lf_service_role(self, config: DataLakeConfig) -> str:
+        """Get or create IAM role for Lake Formation service."""
+        role_name = f"{config.bucket_name}-lakeformation-role"
+        iam_client = self._sessions.client("iam")
+        
+        try:
+            response = iam_client.get_role(RoleName=role_name)
+            return response["Role"]["Arn"]
+        except ClientError as exc:
+            if exc.response["Error"].get("Code") != "NoSuchEntity":
+                raise
+        
+        # Create the role
+        trust_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "lakeformation.amazonaws.com"},
+                    "Action": "sts:AssumeRole"
+                }
+            ]
+        }
+        
+        inline_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:GetObject",
+                        "s3:PutObject",
+                        "s3:DeleteObject",
+                        "s3:ListBucket"
+                    ],
+                    "Resource": [
+                        f"arn:aws:s3:::{config.bucket_name}",
+                        f"arn:aws:s3:::{config.bucket_name}/*"
+                    ]
+                }
+            ]
+        }
+        
+        role_config = IamRoleConfig(
+            name=role_name,
+            assume_role_policy=trust_policy,
+            inline_policies={"lakeformation-s3-access": inline_policy}
+        )
+        
+        self._ensure_iam_role(role_config, config.tags)
+        return f"arn:aws:iam::{self._get_account_id()}:role/{role_name}"
+
+    def _update_database_for_lake_formation(self, config: DataLakeConfig) -> None:
+        """Update Glue database to use Lake Formation permissions."""
+        glue_client = self._sessions.client("glue")
+        
+        try:
+            # Get current database
+            response = glue_client.get_database(Name=config.glue_database)
+            database = response["Database"]
+            
+            # Update to use Lake Formation permissions
+            database_input = {
+                "Name": database["Name"],
+                "Description": database.get("Description", "Data lake analytics catalog"),
+                "LocationUri": database.get("LocationUri", ""),
+                "CreateTableDefaultPermissions": [],  # Disable default permissions
+            }
+            
+            glue_client.update_database(
+                Name=config.glue_database,
+                DatabaseInput=database_input
+            )
+            self._logger.debug("Updated database to use Lake Formation permissions")
+        except ClientError as exc:
+            self._logger.warning("Failed to update database for Lake Formation: %s", exc)
+
+    def _grant_lake_formation_permissions(
+        self, lf_client, config: DataLakeConfig, permissions: List[LakeFormationPermission]
+    ) -> int:
+        """Grant Lake Formation permissions."""
+        granted_count = 0
+        
+        for perm in permissions:
+            try:
+                # Build resource specification
+                resource = self._build_lf_resource(perm, config)
+                
+                # Build principal
+                principal = {"DataLakePrincipalIdentifier": perm.principal}
+                
+                # Grant permissions
+                grant_args = {
+                    "Principal": principal,
+                    "Resource": resource,
+                    "Permissions": perm.permissions,
+                }
+                
+                if perm.permissions_with_grant_option:
+                    grant_args["PermissionsWithGrantOption"] = perm.permissions_with_grant_option
+                
+                lf_client.grant_permissions(**grant_args)
+                granted_count += 1
+                self._logger.debug(
+                    "Granted %s permissions to %s on %s",
+                    perm.permissions,
+                    perm.principal,
+                    perm.resource_type
+                )
+            except ClientError as exc:
+                error_code = exc.response["Error"].get("Code", "")
+                if error_code == "AlreadyExistsException":
+                    self._logger.debug("Permission already exists, skipping")
+                    granted_count += 1
+                else:
+                    self._logger.warning("Failed to grant permission: %s", exc)
+        
+        return granted_count
+
+    def _build_lf_resource(self, perm: LakeFormationPermission, config: DataLakeConfig) -> Dict[str, object]:
+        """Build Lake Formation resource specification."""
+        resource_type = perm.resource_type.upper()
+        
+        if resource_type == "DATABASE":
+            return {
+                "Database": {
+                    "Name": perm.database_name or config.glue_database
+                }
+            }
+        elif resource_type == "TABLE":
+            table_resource = {
+                "DatabaseName": perm.database_name or config.glue_database
+            }
+            if perm.table_wildcard:
+                table_resource["TableWildcard"] = {}
+            elif perm.table_name:
+                table_resource["Name"] = perm.table_name
+            else:
+                raise ValueError("table_name or table_wildcard must be specified for TABLE resource")
+            
+            return {"Table": table_resource}
+        elif resource_type == "DATA_LOCATION":
+            return {
+                "DataLocation": {
+                    "ResourceArn": f"arn:aws:s3:::{config.bucket_name}"
+                }
+            }
+        else:
+            raise ValueError(f"Unsupported resource type: {resource_type}")
+
+    # --- Helper Methods ------------------------------------------------------------
+
+    def _get_account_id(self) -> str:
+        """Get the AWS account ID."""
+        sts_client = self._sessions.client("sts")
+        return sts_client.get_caller_identity()["Account"]
+
+    def _tag_glue_resource(self, glue_client, resource_arn: str, tags: Dict[str, str]) -> None:
+        """Tag a Glue resource."""
+        try:
+            glue_client.tag_resource(ResourceArn=resource_arn, TagsToAdd=tags)
+        except ClientError as exc:
+            self._logger.warning("Failed to tag Glue resource %s: %s", resource_arn, exc)
 
     # --- Transactional (Iceberg/Delta) Assets -------------------------------------
 
