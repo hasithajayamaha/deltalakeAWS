@@ -2,12 +2,14 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import Layout from './components/Layout/Layout';
 import Dashboard from './pages/Dashboard';
-import ArchitectureViewer from './pages/ArchitectureViewer';
 import ResourceExplorer from './pages/ResourceExplorer';
-import CostAnalysis from './pages/CostAnalysis';
-import DeploymentManager from './pages/DeploymentManager';
-import Monitoring from './pages/Monitoring';
-import Settings from './pages/Settings';
+import {
+  ArchitectureViewer,
+  CostAnalysis,
+  DeploymentManager,
+  Monitoring,
+  Settings,
+} from './pages/stubs';
 
 const theme = createTheme({
   palette: {
