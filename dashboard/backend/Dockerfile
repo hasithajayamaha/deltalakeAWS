@@ -17,11 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app/ ./app/
 
-# Install deltalake-aws from parent directory
-# Note: In production, this should be installed from PyPI
-COPY ../../src /tmp/deltalake-aws/src
-COPY ../../pyproject.toml /tmp/deltalake-aws/
-RUN pip install -e /tmp/deltalake-aws
+# Note: deltalake-aws should be installed from PyPI in production
+# For development, install it manually before building:
+# pip install -e ../../
+# For now, we'll install dependencies only
 
 # Expose port
 EXPOSE 8000
